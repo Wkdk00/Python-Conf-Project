@@ -1,0 +1,5 @@
+package_name = "mylib"
+repository_url = "https://example.com/repo"
+repo_mode = "remote"
+package_version = "1.2.3"
+max_depth = 3

@@ -99,10 +99,6 @@ def main():
         print(f"Ошибка в конфигурации: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Этап 1: вывод параметров
-    for key in REQUIRED_PARAMS:
-        print(f"{key} = {config[key]}")
-
     # Этап 2: сбор зависимостей
     fetch_dependencies(config)
 

@@ -1,5 +1,5 @@
-package_name = "express"
-repository_url = "https://registry.npmjs.org"
-repo_mode = "remote"
-package_version = "4.18.2"
+package_name = "A"
+repository_url = "test.json"
+repo_mode = "local"
+package_version = "1.0"
 max_depth = 3

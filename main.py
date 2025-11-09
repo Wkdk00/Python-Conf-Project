@@ -4,7 +4,7 @@ import toml
 import json
 import urllib.request
 import urllib.error
-from typing import Any, Dict, List, Tuple, Set
+from typing import Any, Dict, List, Tuple
 
 REQUIRED_PARAMS = {
     "package_name": str,
@@ -71,19 +71,16 @@ def get_dependencies(pkg_data: Dict[str, Any]) -> Dict[str, str]:
     return pkg_data.get("dependencies", {})
 
 
-def build_dependency_graph(
-    config: Dict[str, Any]
-) -> Dict[str, List[Tuple[str, str]]]:
+def build_dependency_graph(config: Dict[str, Any]) -> Dict[str, List[Tuple[str, str]]]:
     mode = config["repo_mode"]
     start_name = config["package_name"]
     start_version = config["package_version"]
     max_depth = config["max_depth"]
+    repo_path = config["repository_url"]
 
-    # Словарь для хранения графа: узел -> список (зависимость, версия)
     graph: Dict[str, List[Tuple[str, str]]] = {}
-    # Стек для DFS: (package_name, version, depth, path)
     stack: List[Tuple[str, str, int, List[str]]] = [(start_name, start_version, 0, [start_name])]
-    visited_global: Set[str] = set()  # для избежания повторной загрузки одного и того же узла
+    visited_global: set = set()
 
     def node_key(name: str, version: str) -> str:
         return f"{name}@{version}"
@@ -92,33 +89,28 @@ def build_dependency_graph(
         name, version, depth, path = stack.pop()
         current_key = node_key(name, version)
 
-        # Пропускаем, если уже обработали этот узел на этой или меньшей глубине
         if current_key in visited_global:
             continue
         visited_global.add(current_key)
 
-        # Загружаем метаданные пакета
         try:
             if mode == "remote":
                 pkg_data = fetch_package_remote(name, version)
-            else:  # local
-                pkg_data = fetch_package_local(config["repository_url"], name, version)
+            else:
+                pkg_data = fetch_package_local(repo_path, name, version)
         except RuntimeError as e:
-            print(f"Предупреждение: пропущен пакет {current_key}: {e}", file=sys.stderr)
+            print(f"Пропущен пакет {current_key}: {e}", file=sys.stderr)
             continue
 
         deps = get_dependencies(pkg_data)
         graph[current_key] = [(dep_name, dep_version) for dep_name, dep_version in deps.items()]
 
-        # Если достигли макс. глубины — не добавляем зависимости в стек
         if depth >= max_depth:
             continue
 
-        # Проверяем циклы и добавляем в стек
         for dep_name, dep_version in deps.items():
             if dep_name in path:
-                # Цикл обнаружен — пропускаем
-                print(f"Циклическая зависимость обнаружена и пропущена: {' → '.join(path + [dep_name])}", file=sys.stderr)
+                print(f"Цикл обнаружен и пропущен: {' → '.join(path + [dep_name])}", file=sys.stderr)
                 continue
             stack.append((dep_name, dep_version, depth + 1, path + [dep_name]))
 
@@ -130,19 +122,43 @@ def print_graph(graph: Dict[str, List[Tuple[str, str]]]) -> None:
         print("Граф зависимостей пуст.")
         return
     print("Граф зависимостей:")
-    for node, deps in graph.items():
+    for node in sorted(graph.keys()):
+        deps = graph[node]
         if deps:
-            print(f"{node} -> " + ", ".join(f"{n}@{v}" for n, v in deps))
+            dep_str = ", ".join(f"{n}@{v}" for n, v in deps)
+            print(f"{node} -> {dep_str}")
         else:
             print(f"{node} -> (нет зависимостей)")
 
 
+def invert_graph(graph: Dict[str, List[Tuple[str, str]]]) -> Dict[str, List[str]]:
+    inv: Dict[str, List[str]] = {}
+    for pkg, deps in graph.items():
+        for dep_name, dep_ver in deps:
+            dep_key = f"{dep_name}@{dep_ver}"
+            inv.setdefault(dep_key, []).append(pkg)
+    return inv
+
+
+def print_reverse_deps(graph: Dict[str, List[Tuple[str, str]]], target: str) -> None:
+    inv = invert_graph(graph)
+    if target in inv:
+        print(f"\nОбратные зависимости для {target}:")
+        for depender in sorted(inv[target]):
+            print(f"  ← {depender}")
+    else:
+        print(f"\nОбратные зависимости для {target} не найдены.")
+
+
 def main():
-    if len(sys.argv) != 2:
-        print("Использование: python depviz.py <путь_к_config.toml>", file=sys.stderr)
+    if len(sys.argv) != 3:
+        print("Использование: python depviz.py <путь_к_config.toml> <целевой_пакет_для_обратных_зависимостей>", file=sys.stderr)
+        print("Пример целевого пакета: lodash@4.17.21 или D@1.0")
         sys.exit(1)
 
     config_path = sys.argv[1]
+    target_reverse = sys.argv[2]
+
     if not os.path.isfile(config_path):
         print(f"Ошибка: файл конфигурации не найден: {config_path}", file=sys.stderr)
         sys.exit(1)
@@ -166,6 +182,7 @@ def main():
     try:
         graph = build_dependency_graph(config)
         print_graph(graph)
+        print_reverse_deps(graph, target_reverse)
     except Exception as e:
         print(f"Критическая ошибка при построении графа: {e}", file=sys.stderr)
         sys.exit(1)

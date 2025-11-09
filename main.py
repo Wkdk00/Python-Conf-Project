@@ -4,7 +4,7 @@ import toml
 import json
 import urllib.request
 import urllib.error
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple, Set
 
 REQUIRED_PARAMS = {
     "package_name": str,
@@ -37,39 +37,104 @@ def validate_config(config: Dict[str, Any]) -> None:
         raise ValueError("max_depth не может быть отрицательным")
 
 
-def fetch_dependencies(config: Dict[str, Any]) -> None:
-    if config["repo_mode"] != "remote":
-        print("Этап 2 поддерживает только repo_mode = 'remote'", file=sys.stderr)
-        sys.exit(1)
-
-    package_name = config["package_name"]
-    version = config["package_version"]
+def fetch_package_remote(package_name: str, version: str) -> Dict[str, Any]:
     url = f"https://registry.npmjs.org/{package_name}/{version}"
-
     try:
         with urllib.request.urlopen(url, timeout=10) as response:
-            data = json.load(response)
+            return json.load(response)
     except urllib.error.HTTPError as e:
-        print(f"Ошибка HTTP при запросе {url}: {e}", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(f"HTTP ошибка для {package_name}@{version}: {e}")
     except urllib.error.URLError as e:
-        print(f"Ошибка сети при запросе {url}: {e}", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(f"Сетевая ошибка для {package_name}@{version}: {e}")
     except json.JSONDecodeError as e:
-        print(f"Некорректный JSON от {url}: {e}", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(f"Некорректный JSON для {package_name}@{version}: {e}")
     except Exception as e:
-        print(f"Неизвестная ошибка при получении данных: {e}", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(f"Неизвестная ошибка при загрузке {package_name}@{version}: {e}")
 
-    dependencies = data.get("dependencies", {})
 
-    if not dependencies:
-        print("Прямые зависимости отсутствуют.")
-    else:
-        print("Прямые зависимости:")
-        for name, version_spec in dependencies.items():
-            print(f"{name}@{version_spec}")
+def fetch_package_local(local_repo_path: str, package_name: str, version: str) -> Dict[str, Any]:
+    if not os.path.isfile(local_repo_path):
+        raise RuntimeError(f"Локальный файл репозитория не найден: {local_repo_path}")
+    try:
+        with open(local_repo_path, "r", encoding="utf-8") as f:
+            repo_data = json.load(f)
+    except Exception as e:
+        raise RuntimeError(f"Ошибка чтения локального репозитория: {e}")
+
+    key = f"{package_name}@{version}"
+    if key not in repo_data:
+        raise RuntimeError(f"Пакет {key} отсутствует в локальном репозитории")
+    return repo_data[key]
+
+
+def get_dependencies(pkg_data: Dict[str, Any]) -> Dict[str, str]:
+    return pkg_data.get("dependencies", {})
+
+
+def build_dependency_graph(
+    config: Dict[str, Any]
+) -> Dict[str, List[Tuple[str, str]]]:
+    mode = config["repo_mode"]
+    start_name = config["package_name"]
+    start_version = config["package_version"]
+    max_depth = config["max_depth"]
+
+    # Словарь для хранения графа: узел -> список (зависимость, версия)
+    graph: Dict[str, List[Tuple[str, str]]] = {}
+    # Стек для DFS: (package_name, version, depth, path)
+    stack: List[Tuple[str, str, int, List[str]]] = [(start_name, start_version, 0, [start_name])]
+    visited_global: Set[str] = set()  # для избежания повторной загрузки одного и того же узла
+
+    def node_key(name: str, version: str) -> str:
+        return f"{name}@{version}"
+
+    while stack:
+        name, version, depth, path = stack.pop()
+        current_key = node_key(name, version)
+
+        # Пропускаем, если уже обработали этот узел на этой или меньшей глубине
+        if current_key in visited_global:
+            continue
+        visited_global.add(current_key)
+
+        # Загружаем метаданные пакета
+        try:
+            if mode == "remote":
+                pkg_data = fetch_package_remote(name, version)
+            else:  # local
+                pkg_data = fetch_package_local(config["repository_url"], name, version)
+        except RuntimeError as e:
+            print(f"Предупреждение: пропущен пакет {current_key}: {e}", file=sys.stderr)
+            continue
+
+        deps = get_dependencies(pkg_data)
+        graph[current_key] = [(dep_name, dep_version) for dep_name, dep_version in deps.items()]
+
+        # Если достигли макс. глубины — не добавляем зависимости в стек
+        if depth >= max_depth:
+            continue
+
+        # Проверяем циклы и добавляем в стек
+        for dep_name, dep_version in deps.items():
+            if dep_name in path:
+                # Цикл обнаружен — пропускаем
+                print(f"Циклическая зависимость обнаружена и пропущена: {' → '.join(path + [dep_name])}", file=sys.stderr)
+                continue
+            stack.append((dep_name, dep_version, depth + 1, path + [dep_name]))
+
+    return graph
+
+
+def print_graph(graph: Dict[str, List[Tuple[str, str]]]) -> None:
+    if not graph:
+        print("Граф зависимостей пуст.")
+        return
+    print("Граф зависимостей:")
+    for node, deps in graph.items():
+        if deps:
+            print(f"{node} -> " + ", ".join(f"{n}@{v}" for n, v in deps))
+        else:
+            print(f"{node} -> (нет зависимостей)")
 
 
 def main():
@@ -78,7 +143,6 @@ def main():
         sys.exit(1)
 
     config_path = sys.argv[1]
-
     if not os.path.isfile(config_path):
         print(f"Ошибка: файл конфигурации не найден: {config_path}", file=sys.stderr)
         sys.exit(1)
@@ -99,8 +163,12 @@ def main():
         print(f"Ошибка в конфигурации: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Этап 2: сбор зависимостей
-    fetch_dependencies(config)
+    try:
+        graph = build_dependency_graph(config)
+        print_graph(graph)
+    except Exception as e:
+        print(f"Критическая ошибка при построении графа: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

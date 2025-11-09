@@ -1,0 +1,21 @@
+{
+  "A@1.0": {
+    "dependencies": {
+      "B": "1.0",
+      "C": "2.0"
+    }
+  },
+  "B@1.0": {
+    "dependencies": {
+      "D": "1.0"
+    }
+  },
+  "C@2.0": {
+    "dependencies": {
+      "A": "1.0"
+    }
+  },
+  "D@1.0": {
+    "dependencies": {}
+  }
+}
